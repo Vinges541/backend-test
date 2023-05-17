@@ -1,0 +1,31 @@
+{
+  "name": "backend-test",
+  "version": "1.0.0",
+  "description": "Тестовое задание",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:Vinges541/backend-test.git"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start:app": "node -r dotenv/config ./build/app.js",
+    "start:sync-real-time": "node -r dotenv/config ./build/sync.js",
+    "start:sync-full-reindex": "node -r dotenv/config ./build/sync.js --full-reindex",
+    "format": "prettier --write \"src/**/*.ts\""
+  },
+  "author": "Artur Saitgalin",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@faker-js/faker": "^8.0.0",
+    "dotenv": "^16.0.3",
+    "mongodb": "^5.5.0"
+  },
+  "devDependencies": {
+    "prettier": "^2.8.8",
+    "typescript": "^5.0.4"
+  },
+  "engines": {
+    "npm": ">=8.19.0",
+    "node": ">=18.12.0"
+  }
+}
