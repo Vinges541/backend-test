@@ -1,10 +1,12 @@
 import { argv, env } from "node:process";
-import fs from "fs/promises";
+import fs from "node:fs/promises";
 import {
   ChangeStreamInsertDocument,
   Collection,
   MongoBulkWriteError,
   MongoClient,
+  ObjectId,
+  WithId,
 } from "mongodb";
 import { faker } from "@faker-js/faker";
 
@@ -17,6 +19,8 @@ const BATCH_SIZE = 1000;
 const BATCH_INTERVAL = 1000;
 
 const RESUME_TOKEN_PATH = "./resume_token.txt";
+
+let insertBatchPromise: Promise<void> | null = null;
 
 type Customer = {
   firstName: string;
@@ -33,7 +37,16 @@ type Customer = {
   createdAt: Date;
 };
 
-function anonymizeCustomer(customer: Customer): Customer {
+function getSeed(objectId: ObjectId) {
+  const hexObjectId = objectId.toString();
+  const timestamp = hexObjectId.slice(0, 8);
+  const counter = hexObjectId.slice(-5);
+  return parseInt(timestamp + counter, 16);
+}
+
+function anonymizeCustomer(customer: WithId<Customer>): WithId<Customer> {
+  faker.seed(getSeed(customer._id));
+
   const firstName = faker.string.alphanumeric(8);
   const lastName = faker.string.alphanumeric(8);
   const emailProvider = customer.email.substring(customer.email.indexOf("@"));
@@ -62,42 +75,17 @@ async function syncFull(
 ) {
   console.log(`[${new Date().toISOString()}] Full synchronization mode`);
 
-  await customersAnonymized.deleteMany();
-
   const cursor = customers.find().sort({ createdAt: "asc" });
-  let i = 0;
-  let bulkOp = customersAnonymized.initializeUnorderedBulkOp();
 
-  try {
-    for await (const customer of cursor) {
-      bulkOp.insert(anonymizeCustomer(customer));
-      ++i;
-      if (i === BATCH_SIZE) {
-        await bulkOp.execute();
-        i = 0;
-        bulkOp = customersAnonymized.initializeUnorderedBulkOp();
-        console.log(
-          `[${new Date().toISOString()}] Inserted ${i} anonymized customers (full-reindex)`
-        );
-      }
-    }
-
-    if (i > 0) {
-      await bulkOp.execute();
-      console.log(
-        `[${new Date().toISOString()}] Inserted ${i} anonymized customers (full-reindex)`
-      );
-    }
-  } catch (error) {
-    if (error instanceof MongoBulkWriteError && error.code === 11000) {
-      console.warn(
-        `[${new Date().toISOString()}] Encountered duplicate key error collection, aborting (full-reindex)`
-      );
-    } else {
-      throw error;
-    }
+  for await (const customer of cursor) {
+    await customersAnonymized.replaceOne(
+      { _id: customer._id },
+      anonymizeCustomer(customer),
+      { upsert: true }
+    );
   }
-  console.log(`[${new Date().toISOString()}] Full synchronization complete`);
+
+  console.log(`[${new Date().toISOString()}] Full synchronization completed`);
 }
 
 async function syncRealTime(
@@ -115,15 +103,15 @@ async function syncRealTime(
       `[${new Date().toISOString()}] Continuing with resume token: ${initResumeToken}`
     );
   } catch (err) {
-    console.error(
+    console.log(
       `[${new Date().toISOString()}] Continuing without resume token`
     );
   }
 
-  let batch: { customer: Customer; resumeToken: string }[] = [];
+  let batch: { customer: WithId<Customer>; resumeToken: string }[] = [];
 
   const changeStream = customers
-    .watch<Customer, ChangeStreamInsertDocument<Customer>>(
+    .watch<Customer, ChangeStreamInsertDocument<WithId<Customer>>>(
       [{ $match: { operationType: "insert" } }],
       {
         fullDocument: "required",
@@ -147,7 +135,7 @@ async function syncRealTime(
 
     const resumeToken = batchToInsert.at(-1)!.resumeToken;
 
-    customersAnonymized
+    insertBatchPromise = customersAnonymized
       .insertMany(
         batchToInsert.map(({ customer }) => customer),
         { ordered: false }
@@ -208,7 +196,17 @@ async function main() {
         `[${new Date().toISOString()}] Got SIGINT. Graceful shutdown start`
       );
       clearInterval(timer);
-      changeStream.close().then(() => client.close());
+      if (!insertBatchPromise) {
+        insertBatchPromise = Promise.resolve();
+      }
+      insertBatchPromise
+        .then(() => changeStream.close())
+        .then(() => client.close())
+        .then(() =>
+          console.log(
+            `[${new Date().toISOString()}] Graceful shutdown completed`
+          )
+        );
     });
   }
 }
